@@ -5,6 +5,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <math.h>
 
 #include "par_malloc.h"
 #include "xmalloc.h"
@@ -31,9 +32,62 @@ void* opt_malloc(size_t bytes) {
   }
 
   lock_arena();
-  // Actual allocation goes here
+
+  if (bytes <= 8192) {
+    int target_bucket = log(bytes) / log(2);
+
+    if (pow(2, target_bucket) < bytes) {
+      target_bucket++;
+    }
+
+    bucket* last_bucket = 0;
+    bucket* current_bucket = arenas[favorite_arena].buckets[target_bucket];
+    assert(bytes <= current_bucket->size);
+
+    void* ret = 0;
+
+    while (current_bucket != 0) {
+      ret = first_free_block(current_bucket->size, current_bucket + 1);
+
+      if (ret == 0) {
+        current_bucket = current_bucket->next_page;
+      } else {
+        return ret;
+      }
+    }
+
+  } else {
+    return malloc(bytes);
+  }
+
   unlock_arena();
   return 0;
+}
+
+void* first_free_block(size_t block_size, chunk* start) {
+  chunk* current = start;
+  while (current != 0) {
+    for (int ii = 0; ii < 7; ii++) {
+      if (current->map[ii] < UINT64_MAX) {
+        
+      }
+    }
+
+    current = current->next;
+  }
+
+  return current;
+}
+
+int first_free(uint64_t* map) {
+  for (int ii = 63; ii >= 0; ii--) {
+    uint64_t mask = pow(2, ii);
+    if (map & mask == 0) {
+      return ii;
+    }
+  }
+
+  return -1;
 }
 
 void opt_free(void* ptr) {
@@ -65,53 +119,63 @@ void init_arenas() {
     pthread_mutex_init(&(arenas[ii].mutex), NULL);
     size_t bucket_size = 16;
     for (int jj = 0; jj < 9; jj++) {
-      bucket current_bucket = arenas[ii].buckets[jj];
-      if (jj < 8) {
-        current_bucket.size = bucket_size;
-        bucket_size *= 2;
-      } else {
-        current_bucket.size = 8192;
-      }
-      current_bucket.start = mmap(0, 2 * PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-      map_pages(current_bucket.size, current_bucket.start, 2);
+      arenas[ii].buckets[jj] = mmap(0, 2 * PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+      create_pages(bucket_size, arenas[ii].buckets[jj], 2);
+      bucket_size *= 2;
     }
   }
 
   arenas_init = 1;
 }
 
-void map_pages(size_t block_size, void* start, size_t pages) {
-    chunk* current_chunk = start;
-    void* mem_start = start + sizeof(chunk);
-    if (mem_start + 128 * block_size <=)
+void create_pages(size_t block_size, void* start, size_t pages) {
+  for (int ii = 0; ii < pages; ii++) {
+    void* page_start = start + ii * PAGE_SIZE;
+    if (ii + 1 >= pages) {
+      create_page(block_size, page_start, 0);
+    } else {
+      create_page(block_size, page_start, page_start + PAGE_SIZE);
+    }
+  }
 }
 
-void map_page(size_t block_size, void* start, void* next_page) {
+void create_page(size_t block_size, void* start, void* next_page) {
   assert((size_t)start % 4096 == 0);
-
   void* page_end = start + PAGE_SIZE;
-  chunk* current_chunk = start;
+
+  // Create bucket
+  bucket* page_bucket = (bucket*)start;
+  page_bucket->size = block_size;
+  page_bucket->next_page = next_page;
+
+  chunk* current_chunk = start + sizeof(bucket);
 
   while (current_chunk < page_end - sizeof(chunk)) {
     void* mem_start = current_chunk + sizeof(chunk);
 
-    if (mem_start + 128 < page_end) {
-      current_chunk->map[0] = 0;
-      current_chunk->map[1] = 0;
-      current_chunk->next = mem_start + 128;
-    } else {
-      int blocks = page_end - mem_start;
-      current_chunk->map[1] = UINT64_MAX;
-      if (blocks > 64) {
-        current_chunk->map[0] = 0;
-        current_chunk->map[1] >>= blocks - 64; 
-      } else {
-        current_chunk->map[0] = UINT64_MAX;
-        current_chunk->map[0] >>= blocks;
+    if (mem_start + 256 < page_end) {
+      for (int ii = 0; ii < 7; ii++) {
+        current_chunk->map[ii] = 0;
       }
+      current_chunk->next = mem_start + 256;
+    } else {
+      int blocks = (page_end - mem_start) / block_size;
+      for (int ii = 0; ii < 7; ii++) {
+        if (blocks >= 64) {
+          current_chunk->map[ii] = 0;
+          blocks -= 64;
+        } else {
+          current_chunk->map[ii] = UINT64_MAX >> blocks;
+          if (blocks > 0) {
+            blocks = 0;
+          }
+        }
+      }
+
+      current_chunk->next = 0;
     }
 
-    // TODO: Set next
+    current_chunk += (sizeof(chunk) + 256);
   }
 }
 

@@ -10,19 +10,19 @@ void* opt_realloc(void* prev, size_t bytes);
 void init_arenas();
 
 typedef struct chunk {
-  uint64_t map[2];
+  uint64_t map[7];
   chunk* next;
 } chunk;
 
 typedef struct bucket {
   size_t size;
-  chunk* start;
+  void* next_page;
 } bucket;
 
 
 typedef struct arena {
   pthread_mutex_t mutex;
-  bucket buckets[9];
+  bucket* buckets[9];
 } arena;
 
 #endif
