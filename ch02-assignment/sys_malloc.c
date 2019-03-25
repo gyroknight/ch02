@@ -9,7 +9,6 @@
 void*
 xmalloc(size_t bytes)
 {
-    printf("%ld\n", bytes);
     return malloc(bytes);
 }
 
@@ -22,7 +21,6 @@ xfree(void* ptr)
 void*
 xrealloc(void* prev, size_t bytes)
 {
-    printf("%ld\n", bytes);
     return realloc(prev, bytes);
 }
 
