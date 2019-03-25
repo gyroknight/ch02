@@ -69,7 +69,7 @@ void* first_free_block(size_t block_size, chunk* start) {
   while (current != 0) {
     for (int ii = 0; ii < 7; ii++) {
       if (current->map[ii] < UINT64_MAX) {
-        
+
       }
     }
 
@@ -93,12 +93,41 @@ int first_free(uint64_t* map) {
 void opt_free(void* ptr) {
   // Interesting implications here, since the pointer to free doesn't have a block size
   // How do you find the closest page?
-  lock_arena();
+  // lock_arena();
+  //
+  // unlock_arena();
+  int rv;
+  int found = 0;
+  for (int ii = 0; ii < 9; ii++){
+      rv = pthread_mutex_lock(&(arenas[ii].mutex));
+      assert(rv == 0);
+      if (clear_arena(arenas[ii])) {
+          found = 1;
+      }
+      rv = pthread_mutex_unlock(&(arenas[ii].mutex));
+      assert(rv == 0);
+  }
 
-  unlock_arena();
+  if (!found) {
+      free(ptr);
+  }
 
-  return 0;
+
 }
+
+// runs through all buckets in an arena, returning 1 if it cleared the ptr to free
+int clear_arena(arena* arena, void* ptr) {
+    // TODO
+    for (int ii = 0; ii < 9; ii++){
+        bucket* current_bucket = arena->buckets[ii];
+        if ((void*) current_bucket < ptr && ptr < (void*) current_bucket + PAGE_SIZE) {
+            // within the boundaries of this page, able to be freed
+            // TODO: change the bitmap
+        }
+    }
+}
+
+
 
 void* opt_realloc(void* prev, size_t bytes) {
     void* new_block = opt_malloc(bytes);
