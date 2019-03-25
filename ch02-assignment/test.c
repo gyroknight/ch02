@@ -11,8 +11,9 @@
 #include "par_malloc.h"
 
 int main(int _ac, const char* _av[]) {
-    for (int ii = 0; ii < 64000; ii ++) {
-        void* test = opt_malloc(16);
+    for (int ii = 0; ii < 750; ii++) {
+        opt_malloc(2048);
     }
-    return 0;
+
+  return 0;
 }
