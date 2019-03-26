@@ -12,7 +12,7 @@
 #include "par_malloc.h"
 #include "xmalloc.h"
 
-const size_t PAGE_SIZE = 1024 * 1000;
+const size_t PAGE_SIZE = 1024000;
 static int arenas_init = 0;
 static arena arenas[4];
 static pthread_mutex_t init_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -37,14 +37,14 @@ void* opt_malloc(size_t bytes) {
 
   lock_arena();
 
-  if (bytes <= 8192) {
+  if (bytes <= 2048) {
     int target_bucket = log(bytes) / log(2);
 
     if (pow(2, target_bucket) < bytes) {
       target_bucket++;
     }
 
-    target_bucket = target_bucket - 4 < 0 ? 0 : target_bucket - 4;
+    target_bucket = target_bucket - 5 < 0 ? 0 : target_bucket - 5;
 
     bucket* last_bucket = 0;
     bucket* current_bucket = arenas[favorite_arena].buckets[target_bucket];
@@ -66,12 +66,13 @@ void* opt_malloc(size_t bytes) {
 
     current_bucket = mmap(0, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     assert(current_bucket > 0);
+    
     last_bucket->next_page = current_bucket;
     create_page(last_bucket->size, current_bucket, 0);
-    *((uint64_t*)(current_bucket + 1)) = 1;
+    current_bucket->map[0] = 1;
 
     unlock_arena();
-    return (void*)(current_bucket + 1) + sizeof(chunk);
+    return (void*)(current_bucket + 1);
   } else {
     unlock_arena();
     return malloc(bytes);
@@ -79,20 +80,23 @@ void* opt_malloc(size_t bytes) {
 }
 
 void* first_free_block(bucket* b) {
-  chunk* current = (chunk*)(b + 1);
+  int rv = pthread_mutex_lock(&(b->mutex));
+  assert(rv == 0);
   size_t block_size = b->size;
+  void* mem_start = (void*)(b + 1);
+  void* ret = 0;
 
-  while (current != 0) {
-    for (int ii = 0; ii < 4; ii++) {
-      if (current->map[ii] < UINT64_MAX) {
-        return (void*)(current + 1) + block_size * free_index(&current->map[ii]) + ii * 64 * block_size;
-      }
+  for (int ii = 0; ii < 480; ii++) {
+    if (b->map[ii] < UINT64_MAX) {
+      ret = mem_start + block_size * free_index(&(b->map[ii])) + ii * 64 * block_size;
+      break;
     }
-
-    current = current->next;
   }
 
-  return 0;
+  rv = pthread_mutex_unlock(&(b->mutex));
+  assert(rv == 0);
+
+  return ret;
 }
 
 // Gives you the index of the first free spot in the map and sets it as allocated
@@ -110,46 +114,31 @@ int free_index(uint64_t* map) {
 }
 
 void opt_free(void* ptr) {
-  // Interesting implications here, since the pointer to free doesn't have a block size
-  // How do you find the closest page?
+  bucket* closest = closest_bucket(ptr);
 
-  // lock_arena();
-  //
-  // unlock_arena();
-  // int rv;
-  // int found = 0;
-  // for (int ii = 0; ii < 9; ii++){
-  //     rv = pthread_mutex_lock(&(arenas[ii].mutex));
-  //     assert(rv == 0);
-  //     if (clear_arena(arenas[ii])) {
-  //         found = 1;
-  //     }
-  //     rv = pthread_mutex_unlock(&(arenas[ii].mutex));
-  //     assert(rv == 0);
-  // }
+  if (closest != 0) {
+    void* mem_start = (void*)(closest + 1);
+    size_t index = (ptr - mem_start) / closest->size;
+    int offset = index / 64;
+    uint64_t mask = ~(uint64_t)(pow(2, (index % 64)));
+    // printf("%p %p %ld %d\n", ptr, mem_start, index, offset);
+    int rv = pthread_mutex_lock(&(closest->mutex));
+    assert(rv == 0);
 
-  // if (!found) {
-  //     free(ptr);
-  // }
-}
+    closest->map[offset] = closest->map[offset] & mask; 
 
-// runs through all buckets in an arena, returning 1 if it cleared the ptr to free
-int clear_arena(arena* arena, void* ptr) {
-    // TODO
-    for (int ii = 0; ii < 9; ii++){
-        bucket* current_bucket = arena->buckets[ii];
-        if ((void*) current_bucket < ptr && ptr < (void*) current_bucket + PAGE_SIZE) {
-            // within the boundaries of this page, able to be freed
-            // TODO: change the bitmap
-        }
-    }
+    rv = pthread_mutex_unlock(&(closest->mutex));
+    assert(rv == 0);
+  } else {
+    free(ptr);
+  }
 }
 
 void* opt_realloc(void* prev, size_t bytes) {
     void* new_block = opt_malloc(bytes);
     size_t prev_size = get_block_size(prev);
 
-    if (bytes <= prev_size) {
+    if (bytes <= prev_size || prev_size == 0) {
       memcpy(new_block, prev, bytes);
     } else {
       memcpy(new_block, prev, prev_size);
@@ -166,7 +155,7 @@ size_t get_block_size(void* ptr) {
 bucket* closest_bucket(void* ptr) {
   for (int ii = 0; ii < 4; ii++) {
     arena cur_arena = arenas[ii];
-    for (int jj = 0; jj < 10; jj++) {
+    for (int jj = 0; jj < 7; jj++) {
       bucket* cur_bucket = cur_arena.buckets[jj];
       while (cur_bucket != 0) {
         if (ptr > (void*)cur_bucket && ptr < (void*)cur_bucket + PAGE_SIZE) {
@@ -188,8 +177,8 @@ void init_arenas() {
   if (!arenas_init) {
     for (int ii = 0; ii < 4; ii++) {
       pthread_mutex_init(&(arenas[ii].mutex), NULL);
-      size_t bucket_size = 16;
-      for (int jj = 0; jj < 10; jj++) {
+      size_t bucket_size = 32;
+      for (int jj = 0; jj < 7; jj++) {
         arenas[ii].buckets[jj] = mmap(0, 2 * PAGE_SIZE, PROT_READ | PROT_WRITE,
                                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         create_pages(bucket_size, arenas[ii].buckets[jj], 2);
@@ -223,36 +212,21 @@ void create_page(size_t block_size, void* start, bucket* next_page) {
   bucket* page_bucket = (bucket*)start;
   page_bucket->size = block_size;
   page_bucket->next_page = next_page;
-
-  chunk* current_chunk = start + sizeof(bucket);
-
-  while ((void*)current_chunk < page_end - sizeof(chunk)) {
-    void* mem_start = (void*)(current_chunk + 1);
-
-    if (mem_start + 256 * block_size < page_end) {
-      for (int ii = 0; ii < 4; ii++) {
-        current_chunk->map[ii] = 0;
-      }
-      current_chunk->next = mem_start + 256 * block_size;
+  int rv = pthread_mutex_init(&(page_bucket->mutex), NULL);
+  assert(rv == 0);
+  
+  void* mem_start = (void*)(page_bucket + 1);
+  size_t blocks = ((size_t)page_end - (size_t)mem_start) / block_size;
+  for (int ii = 0; ii < 480; ii++) {
+    if (blocks >= 64) {
+      page_bucket->map[ii] = 0;
+      blocks -= 64;
     } else {
-      int blocks = (page_end - mem_start) / block_size;
-      for (int ii = 0; ii < 4; ii++) {
-        if (blocks >= 64) {
-          current_chunk->map[ii] = 0;
-          blocks -= 64;
-        } else {
-          current_chunk->map[ii] = UINT64_MAX << blocks;
-          if (blocks > 0) {
-            blocks = 0;
-          }
-        }
+      page_bucket->map[ii] = UINT64_MAX << blocks;
+      if (blocks > 0) {
+        blocks = 0;
       }
-
-      current_chunk->next = 0;
-      return;
     }
-
-    current_chunk = current_chunk->next; 
   }
 }
 

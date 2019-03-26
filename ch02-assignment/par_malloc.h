@@ -7,20 +7,17 @@ void* opt_malloc(size_t bytes);
 void opt_free(void* ptr);
 void* opt_realloc(void* prev, size_t bytes);
 
-typedef struct chunk {
-  uint64_t map[4];
-  struct chunk* next;
-} chunk;
-
 typedef struct bucket {
   size_t size;
   struct bucket* next_page;
+  pthread_mutex_t mutex;
+  uint64_t map[480];
 } bucket;
 
 
 typedef struct arena {
   pthread_mutex_t mutex;
-  bucket* buckets[10];
+  bucket* buckets[7];
 } arena;
 
 void init_arenas();
