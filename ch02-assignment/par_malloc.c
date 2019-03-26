@@ -12,7 +12,7 @@
 #include "par_malloc.h"
 #include "xmalloc.h"
 
-const size_t PAGE_SIZE = 1024 * 1000;
+const size_t PAGE_SIZE = 1024000;
 static int arenas_init = 0;
 static arena arenas[4];
 static pthread_mutex_t init_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -108,67 +108,20 @@ void remove_free(bucket* b) {
 }
 
 void opt_free(void* ptr) {
-  // bucket* closest = closest_bucket(ptr);
-  // if (closest != 0) {
-  //   int rv = pthread_mutex_lock(&(closest->lock));
-  //   assert(rv == 0);
+  bucket* closest = closest_bucket(ptr);
+  if (closest != 0) {
+    int rv = pthread_mutex_lock(&(closest->lock));
+    assert(rv == 0);
 
-  //   free_cell* new_free = (free_cell*)ptr;
-  //   new_free->size = closest->size;
-  //   free_cell* cur_free = closest->free;
+    free_cell* new_free = (free_cell*)ptr;
+    new_free->size = closest->size;
+    new_free->next = closest->free;
+    closest->free = new_free;
 
-  //   while (cur_free != 0) {
-  //     free_cell* next = cur_free->next;
-  //     if (cur_free > new_free) {
-  //       // Block is the earliest in the list
-  //       closest->free = new_free;
-  //       join_free(new_free, cur_free);
-
-  //       rv = pthread_mutex_unlock(&(closest->lock));
-  //       assert(rv == 0);
-  //       return;
-  //     } else if (cur_free < new_free && next > new_free) {
-  //       // Block goes in between the current and next blocks
-  //       int ret = join_free(cur_free, new_free);
-  //       if (ret) {
-  //         // Block was coalesced with current
-  //         join_free(cur_free, next);
-  //       } else {
-  //         // Block is separate
-  //         join_free(new_free, next);
-  //       }
-
-  //       rv = pthread_mutex_unlock(&(closest->lock));
-  //       assert(rv == 0);
-  //       return;
-  //     } else {
-  //       cur_free = next;
-  //     }
-  //   }
-
-  //   closest->free = new_free;
-  //   new_free->next = 0;
-
-  //   rv = pthread_mutex_unlock(&(closest->lock));
-  //   assert(rv == 0);
-  // } else {
-  //   free(ptr);
-  // }
-}
-
-// Joins two free blocks and coalesces them if possible
-// Returns 1 if blocks were combined, 0 if they were just linked
-int join_free(free_cell* first, free_cell* next) {
-  void* first_end = (void*)first + first->size;
-  if (first_end == (void*)next) {
-    // Combine blocks
-    first->next = next->next;
-    first->size += next->size;
-    return 1;
+    rv = pthread_mutex_unlock(&(closest->lock));
+    assert(rv == 0);
   } else {
-    // Link blocks
-    first->next = next;
-    return 0;
+    free(ptr);
   }
 }
 
