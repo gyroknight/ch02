@@ -59,7 +59,6 @@ void* opt_malloc(size_t bytes) {
         last_bucket = current_bucket;
         current_bucket = current_bucket->next_page;
       } else {
-        // printf("%ld %p %p\n", current_bucket->size, current_bucket, ret);
         unlock_arena();
         return ret;
       }
@@ -81,13 +80,18 @@ void* opt_malloc(size_t bytes) {
 }
 
 void* first_free_block(bucket* b) {
+  int rv = pthread_mutex_lock(&(b->lock));
+  assert(rv == 0);
   free_cell* cur_free = b->free;
+
   if (cur_free != 0) {
     remove_free(b);
-    return cur_free;
   }
 
-  return 0;
+  rv = pthread_mutex_unlock(&(b->lock));
+  assert(rv == 0);
+
+  return cur_free;
 }
 
 void remove_free(bucket* b) {
@@ -103,61 +107,76 @@ void remove_free(bucket* b) {
   }
 }
 
-// Gives you the index of the first free spot in the map and sets it as allocated
-int free_index(uint64_t* map) {
-  assert(*map < UINT64_MAX);
-  for (int ii = 0; ii < 64; ii++) {
-    uint64_t mask = pow(2, ii);
-    if ((*map & mask) == 0) {
-      *map = *map | mask;
-      return ii;
-    }
-  }
-
-  return -1;
-}
-
 void opt_free(void* ptr) {
-  // Interesting implications here, since the pointer to free doesn't have a block size
-  // How do you find the closest page?
+  // bucket* closest = closest_bucket(ptr);
+  // if (closest != 0) {
+  //   int rv = pthread_mutex_lock(&(closest->lock));
+  //   assert(rv == 0);
 
-  // lock_arena();
-  //
-  // unlock_arena();
-  // int rv;
-  // int found = 0;
-  // for (int ii = 0; ii < 9; ii++){
-  //     rv = pthread_mutex_lock(&(arenas[ii].mutex));
-  //     assert(rv == 0);
-  //     if (clear_arena(arenas[ii])) {
-  //         found = 1;
+  //   free_cell* new_free = (free_cell*)ptr;
+  //   new_free->size = closest->size;
+  //   free_cell* cur_free = closest->free;
+
+  //   while (cur_free != 0) {
+  //     free_cell* next = cur_free->next;
+  //     if (cur_free > new_free) {
+  //       // Block is the earliest in the list
+  //       closest->free = new_free;
+  //       join_free(new_free, cur_free);
+
+  //       rv = pthread_mutex_unlock(&(closest->lock));
+  //       assert(rv == 0);
+  //       return;
+  //     } else if (cur_free < new_free && next > new_free) {
+  //       // Block goes in between the current and next blocks
+  //       int ret = join_free(cur_free, new_free);
+  //       if (ret) {
+  //         // Block was coalesced with current
+  //         join_free(cur_free, next);
+  //       } else {
+  //         // Block is separate
+  //         join_free(new_free, next);
+  //       }
+
+  //       rv = pthread_mutex_unlock(&(closest->lock));
+  //       assert(rv == 0);
+  //       return;
+  //     } else {
+  //       cur_free = next;
   //     }
-  //     rv = pthread_mutex_unlock(&(arenas[ii].mutex));
-  //     assert(rv == 0);
-  // }
+  //   }
 
-  // if (!found) {
-  //     free(ptr);
+  //   closest->free = new_free;
+  //   new_free->next = 0;
+
+  //   rv = pthread_mutex_unlock(&(closest->lock));
+  //   assert(rv == 0);
+  // } else {
+  //   free(ptr);
   // }
 }
 
-// runs through all buckets in an arena, returning 1 if it cleared the ptr to free
-// int clear_arena(arena* arena, void* ptr) {
-//     // TODO
-//     for (int ii = 0; ii < 9; ii++){
-//         bucket* current_bucket = arena->buckets[ii];
-//         if ((void*) current_bucket < ptr && ptr < (void*) current_bucket + PAGE_SIZE) {
-//             // within the boundaries of this page, able to be freed
-//             // TODO: change the bitmap
-//         }
-//     }
-// }
+// Joins two free blocks and coalesces them if possible
+// Returns 1 if blocks were combined, 0 if they were just linked
+int join_free(free_cell* first, free_cell* next) {
+  void* first_end = (void*)first + first->size;
+  if (first_end == (void*)next) {
+    // Combine blocks
+    first->next = next->next;
+    first->size += next->size;
+    return 1;
+  } else {
+    // Link blocks
+    first->next = next;
+    return 0;
+  }
+}
 
 void* opt_realloc(void* prev, size_t bytes) {
     void* new_block = opt_malloc(bytes);
     size_t prev_size = get_block_size(prev);
 
-    if (bytes <= prev_size) {
+    if (bytes <= prev_size || prev_size == 0) {
       memcpy(new_block, prev, bytes);
     } else {
       memcpy(new_block, prev, prev_size);
@@ -168,7 +187,12 @@ void* opt_realloc(void* prev, size_t bytes) {
 }
 
 size_t get_block_size(void* ptr) {
-  return closest_bucket(ptr)->size;
+  bucket* closest = closest_bucket(ptr);
+  if (closest != 0) {
+    return closest->size;
+  } else {
+    return 0;
+  }
 }
 
 bucket* closest_bucket(void* ptr) {
@@ -230,6 +254,8 @@ void create_page(size_t block_size, void* start, bucket* next_page) {
   bucket* page_bucket = (bucket*)start;
   page_bucket->size = block_size;
   page_bucket->next_page = next_page;
+  int rv = pthread_mutex_init(&(page_bucket->lock), NULL);
+  assert(rv == 0);
   page_bucket->free = (void*)(page_bucket + 1);
   free_cell* start_free = page_bucket->free;
   start_free->next = 0;

@@ -15,6 +15,7 @@ typedef struct free_cell {
 typedef struct bucket {
   size_t size;
   struct bucket* next_page;
+  pthread_mutex_t lock;
   free_cell* free;
 } bucket;
 
@@ -34,5 +35,6 @@ void create_page(size_t block_size, void* start, bucket* next_page);
 size_t get_block_size(void* ptr);
 bucket* closest_bucket(void* ptr);
 void remove_free(bucket* b);
+int join_free(free_cell* first, free_cell* next);
 
 #endif
