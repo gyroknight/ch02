@@ -29,12 +29,9 @@ void init_arenas();
 void lock_arena();
 void unlock_arena();
 void* first_free_block(bucket* b);
-int free_index(uint64_t* map);
-void create_pages(size_t block_size, void* start, size_t pages);
-void create_page(size_t block_size, void* start, bucket* next_page);
+void create_page(size_t block_size, void* start);
 size_t get_block_size(void* ptr);
 bucket* closest_bucket(void* ptr);
 void remove_free(bucket* b);
-int join_free(free_cell* first, free_cell* next);
 
 #endif

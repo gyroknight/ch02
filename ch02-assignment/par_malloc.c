@@ -12,7 +12,7 @@
 #include "par_malloc.h"
 #include "xmalloc.h"
 
-const size_t PAGE_SIZE = 1024 * 1000;
+const size_t PAGE_SIZE = 1024000;
 static int arenas_init = 0;
 static arena arenas[4];
 static pthread_mutex_t init_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -48,7 +48,7 @@ void* opt_malloc(size_t bytes) {
 
     bucket* last_bucket = 0;
     bucket* current_bucket = arenas[favorite_arena].buckets[target_bucket];
-    assert(bytes <= current_bucket->size);
+    // assert(bytes <= current_bucket->size);
 
     void* ret = 0;
 
@@ -67,13 +67,13 @@ void* opt_malloc(size_t bytes) {
     current_bucket = mmap(0, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     assert(current_bucket > 0);
     last_bucket->next_page = current_bucket;
-    create_page(last_bucket->size, current_bucket, 0);
+    create_page(last_bucket->size, current_bucket);
     ret = first_free_block(current_bucket);
-    assert(ret > 0);
 
     unlock_arena();
     return ret;
   } else {
+    // Fallback to system malloc for larger than 2048 allocations
     unlock_arena();
     return malloc(bytes);
   }
@@ -95,80 +95,31 @@ void* first_free_block(bucket* b) {
 }
 
 void remove_free(bucket* b) {
-  assert(b->free != 0);
   free_cell* cur_free = b->free;
   if (cur_free->size - b->size >= b->size) {
     b->free = (void*)cur_free + b->size;
     b->free->next = cur_free->next;
     b->free->size = cur_free->size - b->size;
   } else {
-    assert(cur_free->size >= b->size);
     b->free = cur_free->next;
   }
 }
 
 void opt_free(void* ptr) {
-  // bucket* closest = closest_bucket(ptr);
-  // if (closest != 0) {
-  //   int rv = pthread_mutex_lock(&(closest->lock));
-  //   assert(rv == 0);
+  bucket* closest = closest_bucket(ptr);
+  if (closest != 0) {
+    int rv = pthread_mutex_lock(&(closest->lock));
+    assert(rv == 0);
 
-  //   free_cell* new_free = (free_cell*)ptr;
-  //   new_free->size = closest->size;
-  //   free_cell* cur_free = closest->free;
+    free_cell* new_free = (free_cell*)ptr;
+    new_free->size = closest->size;
+    new_free->next = closest->free;
+    closest->free = new_free;
 
-  //   while (cur_free != 0) {
-  //     free_cell* next = cur_free->next;
-  //     if (cur_free > new_free) {
-  //       // Block is the earliest in the list
-  //       closest->free = new_free;
-  //       join_free(new_free, cur_free);
-
-  //       rv = pthread_mutex_unlock(&(closest->lock));
-  //       assert(rv == 0);
-  //       return;
-  //     } else if (cur_free < new_free && next > new_free) {
-  //       // Block goes in between the current and next blocks
-  //       int ret = join_free(cur_free, new_free);
-  //       if (ret) {
-  //         // Block was coalesced with current
-  //         join_free(cur_free, next);
-  //       } else {
-  //         // Block is separate
-  //         join_free(new_free, next);
-  //       }
-
-  //       rv = pthread_mutex_unlock(&(closest->lock));
-  //       assert(rv == 0);
-  //       return;
-  //     } else {
-  //       cur_free = next;
-  //     }
-  //   }
-
-  //   closest->free = new_free;
-  //   new_free->next = 0;
-
-  //   rv = pthread_mutex_unlock(&(closest->lock));
-  //   assert(rv == 0);
-  // } else {
-  //   free(ptr);
-  // }
-}
-
-// Joins two free blocks and coalesces them if possible
-// Returns 1 if blocks were combined, 0 if they were just linked
-int join_free(free_cell* first, free_cell* next) {
-  void* first_end = (void*)first + first->size;
-  if (first_end == (void*)next) {
-    // Combine blocks
-    first->next = next->next;
-    first->size += next->size;
-    return 1;
+    rv = pthread_mutex_unlock(&(closest->lock));
+    assert(rv == 0);
   } else {
-    // Link blocks
-    first->next = next;
-    return 0;
+    free(ptr);
   }
 }
 
@@ -222,9 +173,9 @@ void init_arenas() {
       pthread_mutex_init(&(arenas[ii].mutex), NULL);
       size_t bucket_size = 32;
       for (int jj = 0; jj < 7; jj++) {
-        arenas[ii].buckets[jj] = mmap(0, 2 * PAGE_SIZE, PROT_READ | PROT_WRITE,
+        arenas[ii].buckets[jj] = mmap(0, PAGE_SIZE, PROT_READ | PROT_WRITE,
                                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        create_pages(bucket_size, arenas[ii].buckets[jj], 2);
+        create_page(bucket_size, arenas[ii].buckets[jj]);
         bucket_size *= 2;
       }
     }
@@ -236,24 +187,11 @@ void init_arenas() {
   assert(rv == 0);
 }
 
-void create_pages(size_t block_size, void* start, size_t pages) {
-  for (int ii = 0; ii < pages; ii++) {
-    void* page_start = start + ii * PAGE_SIZE;
-    if (ii + 1 >= pages) {
-      create_page(block_size, page_start, 0);
-    } else {
-      create_page(block_size, page_start, page_start + PAGE_SIZE);
-    }
-  }
-}
-
-void create_page(size_t block_size, void* start, bucket* next_page) {
-  assert((size_t)start % 4096 == 0);
-
+void create_page(size_t block_size, void* start) {
   // Create bucket
   bucket* page_bucket = (bucket*)start;
   page_bucket->size = block_size;
-  page_bucket->next_page = next_page;
+  page_bucket->next_page = 0;
   int rv = pthread_mutex_init(&(page_bucket->lock), NULL);
   assert(rv == 0);
   page_bucket->free = (void*)(page_bucket + 1);
