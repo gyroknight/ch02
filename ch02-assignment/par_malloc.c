@@ -35,103 +35,111 @@ void* opt_malloc(size_t bytes) {
     init_arenas();
   }
 
-  lock_arena();
+  if (bytes == 0)
+    return 0;
 
   if (bytes <= 2048) {
-    int target_bucket = log(bytes) / log(2);
+    size_t mask = 0x800;
+    int target_bucket = 7;
 
-    if (pow(2, target_bucket) < bytes) {
-      target_bucket++;
+    while (!(mask & bytes) && target_bucket > 0) {
+      target_bucket--;
+      mask >>= 1;
     }
 
-    target_bucket = target_bucket - 5 < 0 ? 0 : target_bucket - 5;
+    target_bucket = bytes > mask ? target_bucket + 1 : target_bucket;
 
-    bucket* last_bucket = 0;
-    bucket* current_bucket = arenas[favorite_arena].buckets[target_bucket];
-    assert(bytes <= current_bucket->size);
+    lock_arena();
 
-    void* ret = 0;
-
-    while (current_bucket != 0) {
-      ret = first_free_block(current_bucket);
-
-      if (ret == 0) {
-        last_bucket = current_bucket;
-        current_bucket = current_bucket->next_page;
-      } else {
-        unlock_arena();
-        return ret;
-      }
-    }
-
-    current_bucket = mmap(0, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    assert(current_bucket > 0);
-    
-    last_bucket->next_page = current_bucket;
-    create_page(last_bucket->size, current_bucket, 0);
-    current_bucket->map[0] = 1;
+    bucket* bucket_found = arenas[favorite_arena].buckets[target_bucket];
+    void* ret = first_free_block(bucket_found);
 
     unlock_arena();
-    return (void*)(current_bucket + 1);
+    return ret;
   } else {
     unlock_arena();
-    return malloc(bytes);
+    size_t* largeMem = mmap(0, bytes + sizeof(size_t), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(largeMem > 0);
+    *largeMem = bytes;
+    return (void*)(largeMem + 1);
   }
 }
 
 void* first_free_block(bucket* b) {
-  int rv = pthread_mutex_lock(&(b->mutex));
+  int rv = pthread_mutex_lock(&b->mutex);
   assert(rv == 0);
   size_t block_size = b->size;
-  void* mem_start = (void*)(b + 1);
-  void* ret = 0;
+  size_t blockIdx = 0;
+  uint8_t* ret = 0;
 
-  for (int ii = 0; ii < 480; ii++) {
-    if (b->map[ii] < UINT64_MAX) {
-      ret = mem_start + block_size * free_index(&(b->map[ii])) + ii * 64 * block_size;
-      break;
+  while (block_size != 16) {
+    blockIdx++;
+    block_size >>= 1;
+  }
+
+  while (!ret) {
+    uint64_t* mapStart = (uint64_t*)(b + 1);
+
+    for (int ii = 0; ii < pageMaps[blockIdx]; ii++) {
+      if (*(mapStart + ii) != UINT64_MAX) {
+        int bitIdx = 0;
+        uint64_t mask = 1;
+
+        while (*(mapStart + ii) & mask) {
+          bitIdx++;
+          mask <<= 1;
+        }
+
+        ret = (uint8_t*)(mapStart + pageMaps[blockIdx]) + bitIdx * b->size + ii * 64 * b->size;
+        *(mapStart + ii) |= mask;
+        break;
+      }
+    }
+
+    if (!ret) {
+      if (b->next_page) {
+        bucket* nextPage = b->next_page;
+        rv = pthread_mutex_lock(&nextPage->mutex);
+        assert(rv == 0);
+        rv = pthread_mutex_unlock(&b->mutex);
+        assert(rv == 0);
+        b = nextPage;
+      } else {
+        bucket* newBucket = mmap(0, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        assert(newBucket > 0);
+        init_page(b->size, newBucket);
+        b->next_page = newBucket;
+        *((uint64_t*)(newBucket + 1)) = 1;
+        ret = (uint8_t*)((uint64_t*)(newBucket + 1) + pageMaps[blockIdx]);
+      }
     }
   }
 
   rv = pthread_mutex_unlock(&(b->mutex));
   assert(rv == 0);
 
-  return ret;
-}
-
-// Gives you the index of the first free spot in the map and sets it as allocated
-int free_index(uint64_t* map) {
-  assert(*map < UINT64_MAX);
-  for (int ii = 0; ii < 64; ii++) {
-    uint64_t mask = pow(2, ii);
-    if ((*map & mask) == 0) {
-      *map = *map | mask;
-      return ii;
-    }
-  }
-
-  return -1;
+  return (void*)ret;
 }
 
 void opt_free(void* ptr) {
-  bucket* closest = closest_bucket(ptr);
+  // bucket* closest = closest_bucket(ptr);
 
-  if (closest != 0) {
-    void* mem_start = (void*)(closest + 1);
-    size_t index = (ptr - mem_start) / closest->size;
-    int offset = index / 64;
-    uint64_t mask = ~(uint64_t)(pow(2, (index % 64)));
-    // printf("%p %p %ld %d\n", ptr, mem_start, index, offset);
-    int rv = pthread_mutex_lock(&(closest->mutex));
-    assert(rv == 0);
+  // if (closest != 0) {
+  //   void* mem_start = (void*)(closest + 1);
+  //   size_t index = (ptr - mem_start) / closest->size;
+  //   int offset = index / 64;
+  //   uint64_t mask = ~(uint64_t)(pow(2, (index % 64)));
+  //   // printf("%p %p %ld %d\n", ptr, mem_start, index, offset);
+  //   int rv = pthread_mutex_lock(&(closest->mutex));
+  //   assert(rv == 0);
 
-    closest->map[offset] = closest->map[offset] & mask; 
+  //   closest->map[offset] = closest->map[offset] & mask; 
 
-    rv = pthread_mutex_unlock(&(closest->mutex));
-    assert(rv == 0);
-  } else {
-    free(ptr);
-  }
+  //   rv = pthread_mutex_unlock(&(closest->mutex));
+  //   assert(rv == 0);
+  // } else {
+  //   free(ptr);
+  // }
 }
 
 void* opt_realloc(void* prev, size_t bytes) {
@@ -155,13 +163,19 @@ size_t get_block_size(void* ptr) {
 bucket* closest_bucket(void* ptr) {
   for (int ii = 0; ii < 4; ii++) {
     arena cur_arena = arenas[ii];
-    for (int jj = 0; jj < 7; jj++) {
+    for (int jj = 0; jj < 8; jj++) {
       bucket* cur_bucket = cur_arena.buckets[jj];
       while (cur_bucket != 0) {
-        if (ptr > (void*)cur_bucket && ptr < (void*)cur_bucket + PAGE_SIZE) {
+        int rv = pthread_mutex_lock(&cur_bucket->mutex);
+        assert(rv == 0);
+        if ((uint8_t*)ptr > (uint8_t*)cur_bucket && (uint8_t*)ptr < (uint8_t*)cur_bucket + PAGE_SIZE) {
+          rv = pthread_mutex_unlock(&cur_bucket->mutex);
+          assert(rv == 0);
           return cur_bucket;
         }
 
+        rv = pthread_mutex_unlock(&cur_bucket->mutex);
+        assert(rv == 0);
         cur_bucket = cur_bucket->next_page;
       }
     }
@@ -176,13 +190,15 @@ void init_arenas() {
 
   if (!arenas_init) {
     for (int ii = 0; ii < 4; ii++) {
-      pthread_mutex_init(&(arenas[ii].mutex), NULL);
-      size_t bucket_size = 32;
-      for (int jj = 0; jj < 7; jj++) {
-        arenas[ii].buckets[jj] = mmap(0, 2 * PAGE_SIZE, PROT_READ | PROT_WRITE,
+      rv = pthread_mutex_init(&(arenas[ii].mutex), NULL);
+      assert(rv == 0);
+      size_t bucket_size = 16;
+      for (int jj = 0; jj < 8; jj++) {
+        arenas[ii].buckets[jj] = mmap(0, PAGE_SIZE, PROT_READ | PROT_WRITE,
                                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        create_pages(bucket_size, arenas[ii].buckets[jj], 2);
-        bucket_size *= 2;
+        assert(arenas[ii].buckets[jj] > 0);
+        init_page(bucket_size, arenas[ii].buckets[jj]);
+        bucket_size <<= 1;
       }
     }
 
@@ -193,41 +209,24 @@ void init_arenas() {
   assert(rv == 0);
 }
 
-void create_pages(size_t block_size, void* start, size_t pages) {
-  for (int ii = 0; ii < pages; ii++) {
-    void* page_start = start + ii * PAGE_SIZE;
-    if (ii + 1 >= pages) {
-      create_page(block_size, page_start, 0);
-    } else {
-      create_page(block_size, page_start, page_start + PAGE_SIZE);
-    }
-  }
-}
-
-void create_page(size_t block_size, void* start, bucket* next_page) {
-  assert((size_t)start % 4096 == 0);
-  void* page_end = start + PAGE_SIZE;
-
-  // Create bucket
-  bucket* page_bucket = (bucket*)start;
-  page_bucket->size = block_size;
-  page_bucket->next_page = next_page;
-  int rv = pthread_mutex_init(&(page_bucket->mutex), NULL);
+// block size should be a power of 2 above 16
+void init_page(size_t block_size, void* start) {
+  bucket* header = (bucket*)start;
+  header->size = block_size;
+  header->next_page = 0;
+  int rv = pthread_mutex_init(&header->mutex, NULL);
   assert(rv == 0);
-  
-  void* mem_start = (void*)(page_bucket + 1);
-  size_t blocks = ((size_t)page_end - (size_t)mem_start) / block_size;
-  for (int ii = 0; ii < 480; ii++) {
-    if (blocks >= 64) {
-      page_bucket->map[ii] = 0;
-      blocks -= 64;
-    } else {
-      page_bucket->map[ii] = UINT64_MAX << blocks;
-      if (blocks > 0) {
-        blocks = 0;
-      }
-    }
+
+  size_t bucketIdx = 0;
+
+  while (block_size != 16) {
+    block_size >>= 1;
+    bucketIdx++;
   }
+
+  uint64_t* mapStart = (uint64_t*)(header + 1);
+  memset(mapStart, 0, (pageMaps[bucketIdx] - 1) * sizeof(uint64_t));
+  *(mapStart + pageMaps[bucketIdx] - 1) = lastMap[bucketIdx];
 }
 
 void lock_arena() {
